@@ -346,6 +346,27 @@ async def extend_group(ctx):
     general = get_general_channel(ctx.guild)
     await general.send(f"⏳ **Group Extended:** Group {group_id} - {group['subject']} now expires at {new_expire_str}.")
 
+@bot.command(name='help')
+async def help_command(ctx):
+    """
+    Displays the list of available commands.
+    Usage: -help
+    """
+    embed = discord.Embed(
+        title="📚 **ScholarSync Bot Commands**",
+        description="Use the commands below to manage your study groups efficiently!",
+        color=discord.Color.orange(),
+        timestamp=datetime.datetime.utcnow()
+    )
+    embed.add_field(name="**-create**", value="🤓 Create a new study group. You'll be asked for **subject, duration (minutes), and max members**.", inline=False)
+    embed.add_field(name="**-join**", value="👥 Join an existing study group via dropdown. (One group per user)", inline=False)
+    embed.add_field(name="**-leave**", value="🚪 Leave your current study group.", inline=False)
+    embed.add_field(name="**-list**", value="📋 View all active study groups with details.", inline=False)
+    embed.add_field(name="**-share**", value="📢 Share study group details with others.", inline=False)
+    embed.add_field(name="**-members**", value="👤 View all members in a study group.", inline=False)
+    embed.add_field(name="**-extend**", value="⏳ Extend the expiration time of your study group.", inline=False)
+    embed.set_footer(text="Happy Studying! 🚀")
+    await ctx.send(embed=embed)
 
 @bot.command(name='clearall')
 @commands.has_permissions(administrator=True)
