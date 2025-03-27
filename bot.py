@@ -5,6 +5,7 @@ from discord.ext import commands, tasks
 from discord.ui import Select, View
 import datetime
 import asyncio
+import os
 
 # Set up the bot with "-" as the command prefix and disable the default help command.
 bot = commands.Bot(command_prefix='-', help_command=None, intents=discord.Intents.all())
@@ -396,4 +397,4 @@ async def check_expiry():
                 if user_groups.get(user_id) == group_id:
                     user_groups.pop(user_id, None)
 
-bot.run('MTM1MjM0NTA5ODA2MjY2MzY4MA.GR5E78.mBSOZnI8vpIDSV1P2AySvHT0Y1YMVLFJLKJu0g')
+bot.run(os.getenv("TOKEN"))
