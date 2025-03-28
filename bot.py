@@ -1,5 +1,3 @@
-print("Jai RadhaKrishna")
-
 import discord
 from discord.ext import commands, tasks
 from discord.ui import Select, View
