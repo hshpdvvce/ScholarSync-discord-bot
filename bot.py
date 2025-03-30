@@ -1,5 +1,8 @@
 print("Jai RadhaKrishna")
 
+# To install the packages just type the following command in the terminal:
+# pip install -r requirements.txt
+
 import discord
 from discord.ext import commands, tasks
 from discord.ui import Select, View
