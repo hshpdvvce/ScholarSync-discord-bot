@@ -1,9 +1,12 @@
+print("Jai RadhaKrishna")
+
 import discord
 from discord.ext import commands, tasks
 from discord.ui import Select, View
 import datetime
 import asyncio
 import os
+from keep_alive import keep_alive
 
 # Set up the bot with "-" as the command prefix and disable the default help command.
 bot = commands.Bot(command_prefix='-', help_command=None, intents=discord.Intents.all())
@@ -11,7 +14,7 @@ bot = commands.Bot(command_prefix='-', help_command=None, intents=discord.Intent
 # Global storage for study groups.
 # Each group dictionary includes:
 # group_id, subject, max_members, created_by, created_at, expire_at,
-# members (list of user ids), channel (temporary channel id), and alert flags.
+# members (list of user ids), channel (text channel id), voice_channel (voice channel id), and alert flags.
 study_groups = {}
 group_counter = 1  # To assign unique group IDs
 user_groups = {}   # Mapping user_id -> group_id (to allow one group per user)
@@ -42,7 +45,7 @@ def get_general_channel(guild: discord.Guild) -> discord.TextChannel:
 
 @bot.command(name='create')
 async def create_group(ctx):
-    """Creates a study group interactively using a duration from now."""
+    """Creates a study group interactively using a duration from now and sets up both text and voice channels."""
     global group_counter
     if ctx.author.id in user_groups:
         await ctx.send("⚠️ You are already in a study group. Use `-leave` to exit your current group before creating a new one.")
@@ -76,6 +79,7 @@ async def create_group(ctx):
         await ctx.send("⚠️ That doesn't look like a number. Try again.")
         return
 
+    # Removed time zone offset prompt; using UTC directly.
     now = datetime.datetime.utcnow()
     created_at = now
     expire_at = now + datetime.timedelta(minutes=duration)
@@ -88,31 +92,42 @@ async def create_group(ctx):
         "created_at": created_at,
         "expire_at": expire_at,
         "members": [ctx.author.id],
-        "channel": None,
+        "channel": None,          # Text channel id
+        "voice_channel": None,    # Voice channel id
         "alerted_10": False,
         "alerted_5": False,
         "alerted_1": False
     }
     user_groups[ctx.author.id] = group_counter
 
-    # Create a temporary channel with permission overwrites:
-    # Everyone can view messages; only group members can send messages.
     guild = ctx.guild
+    # Create a category for study groups if it doesn't exist.
     category = discord.utils.get(guild.categories, name="Study Groups")
     if not category:
         category = await guild.create_category("Study Groups")
+    
+    # Create text channel with permission overwrites:
     overwrites = {
         guild.default_role: discord.PermissionOverwrite(read_messages=True, send_messages=False),
         ctx.author: discord.PermissionOverwrite(read_messages=True, send_messages=True)
     }
-    channel_name = f"{subject}-{duration}min".replace(' ', '-').lower()
-    group_channel = await guild.create_text_channel(channel_name, category=category, overwrites=overwrites)
-    study_groups[group_counter]["channel"] = group_channel.id
+    text_channel_name = f"{subject}-{duration}min".replace(' ', '-').lower()
+    group_text_channel = await guild.create_text_channel(text_channel_name, category=category, overwrites=overwrites)
+    study_groups[group_counter]["channel"] = group_text_channel.id
+
+    # Voice Channel Integration: Create an associated voice channel with synced permissions.
+    voice_overwrites = {
+        guild.default_role: discord.PermissionOverwrite(view_channel=True, connect=False),
+        ctx.author: discord.PermissionOverwrite(view_channel=True, connect=True)
+    }
+    voice_channel_name = f"{subject}-voice".replace(' ', '-').lower()
+    group_voice_channel = await guild.create_voice_channel(voice_channel_name, category=category, overwrites=voice_overwrites)
+    study_groups[group_counter]["voice_channel"] = group_voice_channel.id
 
     general = get_general_channel(guild)
     expire_str = expire_at.strftime("%H:%M UTC")
     await general.send(f"✅ **Group Created:** ID **{group_counter}** - **{subject}**. Expires at {expire_str}.")
-    await ctx.send(f"✅ Study group created with ID **{group_counter}**! Temporary room: {group_channel.mention}")
+    await ctx.send(f"✅ Study group created with ID **{group_counter}**!\nText Channel: {group_text_channel.mention}\nVoice Channel: {group_voice_channel.mention}")
     group_counter += 1
 
 @bot.command(name='list')
@@ -121,7 +136,6 @@ async def list_groups(ctx):
     if not study_groups:
         await ctx.send("ℹ️ There are no study groups created yet.")
         return
-
     embed = discord.Embed(title="Study Groups Overview", color=discord.Color.blue(), timestamp=datetime.datetime.utcnow())
     for group in study_groups.values():
         created_time = group["created_at"].strftime("%Y-%m-%d %H:%M UTC")
@@ -174,10 +188,14 @@ class GroupSelect(Select):
         group["members"].append(interaction.user.id)
         user_groups[interaction.user.id] = group_id
 
-        # Update channel permissions for the new member.
-        channel = bot.get_channel(group["channel"])
-        if channel:
-            await channel.set_permissions(interaction.user, read_messages=True, send_messages=True)
+        # Update text channel permissions for the new member.
+        text_channel = bot.get_channel(group["channel"])
+        if text_channel:
+            await text_channel.set_permissions(interaction.user, read_messages=True, send_messages=True)
+        # Update voice channel permissions as well.
+        voice_channel = bot.get_channel(group["voice_channel"])
+        if voice_channel:
+            await voice_channel.set_permissions(interaction.user, view_channel=True, connect=True)
 
         await interaction.response.send_message(f"✅ You joined Group {group_id}: {group['subject']}.", ephemeral=True)
         guild = interaction.guild
@@ -200,7 +218,6 @@ async def join_group(ctx):
     if not study_groups:
         await ctx.send("ℹ️ There are no existing study groups. Use **-create** to start one.")
         return
-
     view = GroupJoinView()
     await ctx.send("Select a study group from the dropdown:", view=view)
 
@@ -212,7 +229,7 @@ class MembersSelect(Select):
             label = f"Group {group['group_id']}: {group['subject']}"
             options.append(discord.SelectOption(label=label, value=str(group['group_id'])))
         super().__init__(placeholder="Select a group to view its members...", min_values=1, max_values=1, options=options)
-
+    
     async def callback(self, interaction: discord.Interaction):
         try:
             group_id = int(self.values[0])
@@ -251,18 +268,15 @@ async def share_groups(ctx):
     if not study_groups:
         await ctx.send("ℹ️ There are no study groups available to share.")
         return
-
     options = [
         discord.SelectOption(label=f"Group {group['group_id']}: {group['subject']}", 
                              description=f"Created by {group['created_by']}, {len(group['members'])}/{group['max_members']} members")
         for group in study_groups.values()
     ]
     options.append(discord.SelectOption(label="None", description="Cancel and create your own group"))
-
     class ShareSelect(Select):
         def __init__(self):
             super().__init__(placeholder="📚 Select a study group to share", options=options, min_values=1, max_values=1)
-
         async def callback(self, interaction: discord.Interaction):
             selected_value = self.values[0]
             if selected_value == "None":
@@ -292,14 +306,16 @@ async def leave_group(ctx):
     if ctx.author.id not in user_groups:
         await ctx.send("⚠️ You are not in any study group.")
         return
-
     group_id = user_groups.pop(ctx.author.id)
     group = study_groups.get(group_id)
     if group and ctx.author.id in group["members"]:
         group["members"].remove(ctx.author.id)
-        channel = bot.get_channel(group["channel"])
-        if channel:
-            await channel.set_permissions(ctx.author, overwrite=None)
+        text_channel = bot.get_channel(group["channel"])
+        if text_channel:
+            await text_channel.set_permissions(ctx.author, overwrite=None)
+        voice_channel = bot.get_channel(group["voice_channel"])
+        if voice_channel:
+            await voice_channel.set_permissions(ctx.author, overwrite=None)
         await ctx.send(f"🚪 You have left Group {group_id}: {group['subject']}.")
         guild = ctx.guild
         general = get_general_channel(guild)
@@ -311,7 +327,7 @@ async def leave_group(ctx):
 
 @bot.command(name='extend')
 async def extend_group(ctx):
-    """Allows a user to extend the expiration time of their study group."""
+    """Allows a user to extend the expiration time of their study group (affecting both text and voice channels)."""
     if ctx.author.id not in user_groups:
         await ctx.send("⚠️ You are not in any study group.")
         return
@@ -320,7 +336,6 @@ async def extend_group(ctx):
     if not group:
         await ctx.send("⚠️ Group not found.")
         return
-
     extension_str = await prompt_user(ctx, "⏳ How many minutes do you want to extend the group?")
     if extension_str is None:
         return
@@ -332,13 +347,11 @@ async def extend_group(ctx):
     except ValueError:
         await ctx.send("⚠️ Invalid number.")
         return
-
     group['expire_at'] += datetime.timedelta(minutes=extension)
     # Reset alert flags so that alerts are triggered again after extension.
     group["alerted_10"] = False
     group["alerted_5"] = False
     group["alerted_1"] = False
-
     new_expire_str = group['expire_at'].strftime('%H:%M UTC')
     await ctx.send(f"✅ Group {group_id} extended. New expiration time: {new_expire_str}.")
     general = get_general_channel(ctx.guild)
@@ -352,7 +365,7 @@ async def help_command(ctx):
     """
     embed = discord.Embed(
         title="📚 **ScholarSync Bot Commands**",
-        description="Use the commands below to manage your study groups efficiently!",
+        description="Use the commands below to manage your study groups and boost your study sessions!",
         color=discord.Color.orange(),
         timestamp=datetime.datetime.utcnow()
     )
@@ -384,7 +397,6 @@ async def check_expiry():
     for group_id, group in list(study_groups.items()):
         time_left = (group["expire_at"] - now).total_seconds()
         channel = bot.get_channel(group["channel"]) if group.get("channel") else None
-
         # Send alerts at 10, 5, and 1 minute(s) remaining.
         if time_left <= 600 and time_left > 300 and not group.get("alerted_10", False):
             if channel:
@@ -398,10 +410,8 @@ async def check_expiry():
             if channel:
                 await channel.send("⏰ **Alert:** This group will end in **1 minute**! Type **-extend** to extend the time.")
             group["alerted_1"] = True
-
         if time_left <= 0:
             expired_groups.append(group_id)
-
     for group_id in expired_groups:
         group = study_groups.pop(group_id, None)
         if group:
@@ -411,9 +421,18 @@ async def check_expiry():
             if channel:
                 await channel.send("🗑️ This study group has now ended.")
                 await channel.delete()
+            voice_channel = bot.get_channel(group["voice_channel"]) if group.get("voice_channel") else None
+            if voice_channel:
+                await voice_channel.delete()
             await general.send(f"🗑️ **Group Deleted:** ID **{group_id}** - **{group['subject']}** has been deleted as per the set time.")
             for user_id in group["members"]:
                 if user_groups.get(user_id) == group_id:
                     user_groups.pop(user_id, None)
 
-bot.run(os.getenv("TOKEN"))
+keep_alive()
+
+try:
+    bot.run(os.getenv("TOKEN"))
+except discord.errors.HTTPException as e:
+    print(f"Failed to connect to Discord: {e}")
+    print("Please check your bot token and internet connection")
