@@ -1,34 +1,95 @@
-print("Jai RadhaKrishna")
-
 # To install the packages just type the following command in the terminal:
 # pip install -r requirements.txt
 
 import discord
 from discord.ext import commands, tasks
-from discord.ui import Select, View
+from discord.ui import Select, View, Button
 import datetime
 import asyncio
 import os
 from keep_alive import keep_alive
 
-# Set up the bot with "-" as the command prefix and disable the default help command.
 bot = commands.Bot(command_prefix='-', help_command=None, intents=discord.Intents.all())
 
 # Global storage for study groups.
 # Each group dictionary includes:
 # group_id, subject, max_members, created_by, created_at, expire_at,
-# members (list of user ids), channel (text channel id), voice_channel (voice channel id), and alert flags.
+# members (list of user ids), channel (text channel id), voice_channel (voice channel id), alert flags, and secret flag.
 study_groups = {}
 group_counter = 1  # To assign unique group IDs
 user_groups = {}   # Mapping user_id -> group_id (to allow one group per user)
 
+# ----------------- New Classes for Secret Group & Invite Handling -----------------
+class SecretGroupSelect(Select):
+    """Select menu to choose if the group should be secret."""
+    def __init__(self, creator, secret_future: asyncio.Future):
+        options = [
+            discord.SelectOption(label="Yes", value="yes"),
+            discord.SelectOption(label="No", value="no")
+        ]
+        super().__init__(placeholder="Secret Group? (Yes/No)", min_values=1, max_values=1, options=options)
+        self.creator = creator
+        self.secret_future = secret_future
+
+    async def callback(self, interaction: discord.Interaction):
+        if interaction.user != self.creator:
+            await interaction.response.send_message("This selection is not for you.", ephemeral=True)
+            return
+        if not self.secret_future.done():
+            self.secret_future.set_result(interaction.data["values"][0].lower())
+        await interaction.response.send_message("Secret group selection recorded.", ephemeral=True)
+
+class InviteSelect(Select):
+    """Multi-select menu to choose server members to invite (or choose External Invite)."""
+    def __init__(self, creator, guild):
+        self.creator = creator
+        self.selected_values = []
+        options = []
+        for member in guild.members:
+            if not member.bot and member != creator:
+                options.append(discord.SelectOption(label=member.display_name, value=str(member.id)))
+        options.append(discord.SelectOption(label="External Invite", value="external"))
+        super().__init__(placeholder="Select members to invite", min_values=0, max_values=len(options), options=options)
+
+    async def callback(self, interaction: discord.Interaction):
+        if interaction.user != self.creator:
+            await interaction.response.send_message("This selection is not for you.", ephemeral=True)
+            return
+        self.selected_values = self.values
+        await interaction.response.send_message("Invite selection recorded. Click Confirm when done.", ephemeral=True)
+
+class ConfirmInviteButton(Button):
+    """Button to confirm the invite selection."""
+    def __init__(self, creator):
+        super().__init__(label="Confirm", style=discord.ButtonStyle.green)
+        self.creator = creator
+    async def callback(self, interaction: discord.Interaction):
+        if interaction.user != self.creator:
+            await interaction.response.send_message("This button is not for you.", ephemeral=True)
+            return
+        self.view.confirmed = True
+        await interaction.response.send_message("Invite selection confirmed.", ephemeral=True)
+        self.view.stop()
+
+class InviteView(View):
+    """View that contains the InviteSelect and a Confirm button."""
+    def __init__(self, creator, guild, timeout=20):
+        super().__init__(timeout=timeout)
+        self.confirmed = False
+        self.invite_select = InviteSelect(creator, guild)
+        self.add_item(self.invite_select)
+        self.add_item(ConfirmInviteButton(creator))
+    async def on_timeout(self):
+        self.stop()
+# ------------------------------------------------------------------------------------
+
 @bot.event
 async def on_ready():
     print(f'Bot logged in as {bot.user.name}')
-    check_expiry.start()  # Start background task to monitor group expiry
+    check_expiry.start()
 
 async def prompt_user(ctx, prompt: str) -> str:
-    """Send a prompt message and wait for the user's response."""
+    """Send a prompt message and wait for the command issuer's response."""
     await ctx.send(prompt)
     def check(m):
         return m.author == ctx.author and m.channel == ctx.channel
@@ -40,7 +101,7 @@ async def prompt_user(ctx, prompt: str) -> str:
         return None
 
 def get_general_channel(guild: discord.Guild) -> discord.TextChannel:
-    """Attempt to find a channel named 'general' in the guild; if not found, return the first text channel."""
+    """Return the channel named 'general' or the first text channel if not found."""
     general = discord.utils.get(guild.text_channels, name="general")
     if not general:
         general = guild.text_channels[0]
@@ -48,7 +109,7 @@ def get_general_channel(guild: discord.Guild) -> discord.TextChannel:
 
 @bot.command(name='create')
 async def create_group(ctx):
-    """Creates a study group interactively using a duration from now and sets up both text and voice channels."""
+    """Creates a study group interactively and sets up both text and voice channels."""
     global group_counter
     if ctx.author.id in user_groups:
         await ctx.send("⚠️ You are already in a study group. Use `-leave` to exit your current group before creating a new one.")
@@ -82,55 +143,116 @@ async def create_group(ctx):
         await ctx.send("⚠️ That doesn't look like a number. Try again.")
         return
 
-    # Removed time zone offset prompt; using UTC directly.
     now = datetime.datetime.utcnow()
     created_at = now
     expire_at = now + datetime.timedelta(minutes=duration)
 
-    study_groups[group_counter] = {
-        "group_id": group_counter,
+    current_group_id = group_counter
+    study_groups[current_group_id] = {
+        "group_id": current_group_id,
         "subject": subject,
         "max_members": max_members,
         "created_by": ctx.author.name,
         "created_at": created_at,
         "expire_at": expire_at,
         "members": [ctx.author.id],
-        "channel": None,          # Text channel id
-        "voice_channel": None,    # Voice channel id
+        "channel": None,
+        "voice_channel": None,
         "alerted_10": False,
         "alerted_5": False,
-        "alerted_1": False
+        "alerted_1": False,
+        "secret": False
     }
-    user_groups[ctx.author.id] = group_counter
+    user_groups[ctx.author.id] = current_group_id
 
     guild = ctx.guild
+
+    # ----- Secret Group Prompt -----
+    secret_future = asyncio.get_running_loop().create_future()
+    secret_view = View(timeout=20)
+    secret_select = SecretGroupSelect(ctx.author, secret_future)
+    secret_view.add_item(secret_select)
+    secret_prompt = await ctx.send("🔒 Do you want to create a secret group? (Select Yes or No)", view=secret_view, delete_after=20)
+    try:
+        secret_choice = await asyncio.wait_for(secret_future, timeout=20.0)
+    except asyncio.TimeoutError:
+        secret_choice = "no"
+    try:
+        await secret_prompt.delete()
+    except Exception:
+        pass
+    if secret_choice == "yes":
+        study_groups[current_group_id]["secret"] = True
+    # ---------------------------------
+
     # Create a category for study groups if it doesn't exist.
     category = discord.utils.get(guild.categories, name="Study Groups")
     if not category:
         category = await guild.create_category("Study Groups")
     
-    # Create text channel with permission overwrites:
-    overwrites = {
-        guild.default_role: discord.PermissionOverwrite(read_messages=True, send_messages=False),
-        ctx.author: discord.PermissionOverwrite(read_messages=True, send_messages=True)
-    }
-    text_channel_name = f"{subject}-{duration}min".replace(' ', '-').lower()
-    group_text_channel = await guild.create_text_channel(text_channel_name, category=category, overwrites=overwrites)
-    study_groups[group_counter]["channel"] = group_text_channel.id
+    # Set up channel overwrites based on secret status.
+    if study_groups[current_group_id]["secret"]:
+        text_overwrites = {
+            guild.default_role: discord.PermissionOverwrite(view_channel=False),
+            ctx.author: discord.PermissionOverwrite(read_messages=True, send_messages=True)
+        }
+        voice_overwrites = {
+            guild.default_role: discord.PermissionOverwrite(view_channel=False, connect=False),
+            ctx.author: discord.PermissionOverwrite(view_channel=True, connect=True)
+        }
+    else:
+        text_overwrites = {
+            guild.default_role: discord.PermissionOverwrite(read_messages=True, send_messages=False),
+            ctx.author: discord.PermissionOverwrite(read_messages=True, send_messages=True)
+        }
+        voice_overwrites = {
+            guild.default_role: discord.PermissionOverwrite(view_channel=True, connect=False),
+            ctx.author: discord.PermissionOverwrite(view_channel=True, connect=True)
+        }
 
-    # Voice Channel Integration: Create an associated voice channel with synced permissions.
-    voice_overwrites = {
-        guild.default_role: discord.PermissionOverwrite(view_channel=True, connect=False),
-        ctx.author: discord.PermissionOverwrite(view_channel=True, connect=True)
-    }
+    text_channel_name = f"{subject}-{duration}min".replace(' ', '-').lower()
+    group_text_channel = await guild.create_text_channel(text_channel_name, category=category, overwrites=text_overwrites)
+    study_groups[current_group_id]["channel"] = group_text_channel.id
+
     voice_channel_name = f"{subject}-voice".replace(' ', '-').lower()
     group_voice_channel = await guild.create_voice_channel(voice_channel_name, category=category, overwrites=voice_overwrites)
-    study_groups[group_counter]["voice_channel"] = group_voice_channel.id
+    study_groups[current_group_id]["voice_channel"] = group_voice_channel.id
 
-    general = get_general_channel(guild)
-    expire_str = expire_at.strftime("%H:%M UTC")
-    await general.send(f"✅ **Group Created:** ID **{group_counter}** - **{subject}**. Expires at {expire_str}.")
-    await ctx.send(f"✅ Study group created with ID **{group_counter}**!\nText Channel: {group_text_channel.mention}\nVoice Channel: {group_voice_channel.mention}")
+    # ----- Invite Prompt for Server Members -----
+    invite_view = InviteView(ctx.author, guild, timeout=20)
+    invite_prompt = await ctx.send("👥 (Optional) Select server members to invite (or choose 'External Invite') and click Confirm:", view=invite_view, ephemeral=True)
+    await invite_view.wait()  # Wait for the creator to confirm or timeout.
+    selected_invites = invite_view.invite_select.selected_values
+    if selected_invites:
+        for sel in selected_invites:
+            if sel == "external":
+                invite = await group_text_channel.create_invite(max_age=0, unique=True)
+                try:
+                    await ctx.author.send(f"External Invite Link for secret group '{subject}': {invite.url}")
+                except Exception:
+                    pass
+            else:
+                member_id = int(sel)
+                member = guild.get_member(member_id)
+                if member:
+                    await group_text_channel.set_permissions(member, read_messages=True, send_messages=True)
+                    await group_voice_channel.set_permissions(member, view_channel=True, connect=True)
+                    if member_id not in study_groups[current_group_id]["members"]:
+                        study_groups[current_group_id]["members"].append(member_id)
+                        user_groups[member_id] = current_group_id
+                    try:
+                        await member.send(f"""You have been invited to join the study group '{subject}' (ID {current_group_id}).
+                                          Please check the text channel {group_text_channel.mention} and voice channel {group_voice_channel.mention} for more details.""")
+                    except Exception:
+                        pass
+    # ---------------------------------------------
+
+    # For non-secret groups, the creation is announced in general.
+    if not study_groups[current_group_id]["secret"]:
+        general = get_general_channel(guild)
+        expire_str = expire_at.strftime("%H:%M UTC")
+        await general.send(f"✅ **Group Created:** ID **{current_group_id}** - **{subject}**. Expires at {expire_str}.")
+    await ctx.send(f"✅ Study group created with ID **{current_group_id}**!\nText Channel: {group_text_channel.mention}\nVoice Channel: {group_voice_channel.mention}")
     group_counter += 1
 
 @bot.command(name='list')
@@ -144,8 +266,9 @@ async def list_groups(ctx):
         created_time = group["created_at"].strftime("%Y-%m-%d %H:%M UTC")
         member_count = f"{len(group['members'])}/{group['max_members']}"
         expire_str = group["expire_at"].strftime("%H:%M UTC")
+        secret_status = " (Secret)" if group.get("secret", False) else ""
         embed.add_field(
-            name=f"Group ID {group['group_id']}: {group['subject']}",
+            name=f"Group ID {group['group_id']}: {group['subject']}{secret_status}",
             value=(f"**Created by:** {group['created_by']}\n"
                    f"**Created at:** {created_time}\n"
                    f"**Expires at:** {expire_str}\n"
@@ -159,7 +282,8 @@ class GroupSelect(Select):
     def __init__(self):
         options = []
         for group in study_groups.values():
-            label = f"Group {group['group_id']}: {group['subject']} ({len(group['members'])}/{group['max_members']})"
+            secret_status = " (Secret)" if group.get("secret", False) else ""
+            label = f"Group {group['group_id']}: {group['subject']}{secret_status} ({len(group['members'])}/{group['max_members']})"
             options.append(discord.SelectOption(label=label, value=str(group['group_id'])))
         options.append(discord.SelectOption(label="None (Create your own group)", value="none"))
         super().__init__(placeholder="Select a study group...", min_values=1, max_values=1, options=options)
@@ -191,11 +315,9 @@ class GroupSelect(Select):
         group["members"].append(interaction.user.id)
         user_groups[interaction.user.id] = group_id
 
-        # Update text channel permissions for the new member.
         text_channel = bot.get_channel(group["channel"])
         if text_channel:
             await text_channel.set_permissions(interaction.user, read_messages=True, send_messages=True)
-        # Update voice channel permissions as well.
         voice_channel = bot.get_channel(group["voice_channel"])
         if voice_channel:
             await voice_channel.set_permissions(interaction.user, view_channel=True, connect=True)
@@ -229,7 +351,8 @@ class MembersSelect(Select):
     def __init__(self):
         options = []
         for group in study_groups.values():
-            label = f"Group {group['group_id']}: {group['subject']}"
+            secret_status = " (Secret)" if group.get("secret", False) else ""
+            label = f"Group {group['group_id']}: {group['subject']}{secret_status}"
             options.append(discord.SelectOption(label=label, value=str(group['group_id'])))
         super().__init__(placeholder="Select a group to view its members...", min_values=1, max_values=1, options=options)
     
@@ -265,42 +388,48 @@ async def show_members(ctx):
     view = MembersView()
     await ctx.send("Select a study group to view its members:", view=view)
 
+class ShareSelect(Select):
+    """Dropdown to select a group to share."""
+    def __init__(self):
+        options = []
+        for group in study_groups.values():
+            secret_status = " (Secret)" if group.get("secret", False) else ""
+            options.append(discord.SelectOption(label=f"Group {group['group_id']}: {group['subject']}{secret_status}",
+                                                 description=f"Created by {group['created_by']}, {len(group['members'])}/{group['max_members']} members"))
+        options.append(discord.SelectOption(label="None", description="Cancel and create your own group"))
+        super().__init__(placeholder="📚 Select a study group to share", options=options, min_values=1, max_values=1)
+    async def callback(self, interaction: discord.Interaction):
+        selected_value = self.values[0]
+        if selected_value == "None":
+            await interaction.response.send_message("❌ You chose not to share any group. Use `-create` to start your own!", ephemeral=True)
+        else:
+            group_id = int(selected_value.split(':')[0].split()[-1])
+            group = study_groups.get(group_id)
+            if group:
+                member_count = f"{len(group['members'])}/{group['max_members']}"
+                embed = discord.Embed(
+                    title=f"📢 Study Group {group_id}: {group['subject']}",
+                    color=discord.Color.green(),
+                    timestamp=datetime.datetime.utcnow()
+                )
+                embed.add_field(name="👤 Created By", value=group["created_by"], inline=True)
+                embed.add_field(name="👥 Members", value=member_count, inline=True)
+                embed.add_field(name="⏳ Expires at", value=group["expire_at"].strftime("%H:%M UTC"), inline=True)
+                embed.set_footer(text="Share this message to invite more members!")
+                await interaction.response.send_message(embed=embed)
+                
+class ShareView(View):
+    def __init__(self):
+        super().__init__()
+        self.add_item(ShareSelect())
+
 @bot.command(name='share')
 async def share_groups(ctx):
     """Allows users to share study groups interactively by selecting a Group ID."""
     if not study_groups:
         await ctx.send("ℹ️ There are no study groups available to share.")
         return
-    options = [
-        discord.SelectOption(label=f"Group {group['group_id']}: {group['subject']}", 
-                             description=f"Created by {group['created_by']}, {len(group['members'])}/{group['max_members']} members")
-        for group in study_groups.values()
-    ]
-    options.append(discord.SelectOption(label="None", description="Cancel and create your own group"))
-    class ShareSelect(Select):
-        def __init__(self):
-            super().__init__(placeholder="📚 Select a study group to share", options=options, min_values=1, max_values=1)
-        async def callback(self, interaction: discord.Interaction):
-            selected_value = self.values[0]
-            if selected_value == "None":
-                await interaction.response.send_message("❌ You chose not to share any group. Use `-create` to start your own!", ephemeral=True)
-            else:
-                group_id = int(selected_value.split(':')[0].split()[-1])
-                group = study_groups.get(group_id)
-                if group:
-                    member_count = f"{len(group['members'])}/{group['max_members']}"
-                    embed = discord.Embed(
-                        title=f"📢 Study Group {group_id}: {group['subject']}",
-                        color=discord.Color.green(),
-                        timestamp=datetime.datetime.utcnow()
-                    )
-                    embed.add_field(name="👤 Created By", value=group["created_by"], inline=True)
-                    embed.add_field(name="👥 Members", value=member_count, inline=True)
-                    embed.add_field(name="⏳ Expires at", value=group["expire_at"].strftime("%H:%M UTC"), inline=True)
-                    embed.set_footer(text="Share this message to invite more members!")
-                    await interaction.response.send_message(embed=embed)
-    view = View()
-    view.add_item(ShareSelect())
+    view = ShareView()
     await ctx.send("📢 **Select a study group to share:**", view=view)
 
 @bot.command(name='leave')
@@ -372,7 +501,7 @@ async def help_command(ctx):
         color=discord.Color.orange(),
         timestamp=datetime.datetime.utcnow()
     )
-    embed.add_field(name="**-create**", value="🤓 Create a new study group. You'll be asked for **subject, duration (minutes), and max members**.", inline=False)
+    embed.add_field(name="**-create**", value="🤓 Create a new study group. You'll be asked for **subject, duration (minutes), and max members**. You will also be asked if you want to make it secret and to invite members.", inline=False)
     embed.add_field(name="**-join**", value="👥 Join an existing study group via dropdown. (One group per user)", inline=False)
     embed.add_field(name="**-leave**", value="🚪 Leave your current study group.", inline=False)
     embed.add_field(name="**-list**", value="📋 View all active study groups with details.", inline=False)
@@ -400,7 +529,6 @@ async def check_expiry():
     for group_id, group in list(study_groups.items()):
         time_left = (group["expire_at"] - now).total_seconds()
         channel = bot.get_channel(group["channel"]) if group.get("channel") else None
-        # Send alerts at 10, 5, and 1 minute(s) remaining.
         if time_left <= 600 and time_left > 300 and not group.get("alerted_10", False):
             if channel:
                 await channel.send("⏰ **Alert:** This group will end in **10 minutes**! Type **-extend** to extend the time.")
