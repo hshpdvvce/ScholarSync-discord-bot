@@ -300,7 +300,7 @@ async def create_group(ctx):
                             study_groups[current_group_id]["members"].append(member_id)
                             user_groups[member_id] = current_group_id
                         try:
-                            await member.send(f"You have been invited to join the study group '{group_text_channel.name}' (ID {current_group_id}).\n**Text Channel:** {group_text_channel.mention}\n**Voice Channel:** {group_voice_channel.mention}")
+                            await member.send(f"You have been invited to join the study group **'{group_text_channel.name}'** (ID {current_group_id}).\n**Text Channel:** {group_text_channel.mention}\n**Voice Channel:** {group_voice_channel.mention}")
                         except Exception:
                             pass
     # For public groups, no additional invite prompt here; users can use -share.
@@ -607,8 +607,8 @@ async def invite_command(ctx):
                         user_groups[member_id] = group_id
                     try:
                         await member.send(
-                            f"You have been invited to join the study group **'{group['subject']}' (ID {group_id}).\n**"
-                            f"**CHECK OUT** \nText Channel {group_text_channel.mention} \nVoice Channel {voice_channel.mention}"
+                            f"You have been invited to join the study group **'{group['subject']}'** (ID {group_id}).\n"
+                            f"CHECK OUT \nText Channel {group_text_channel.mention} \nVoice Channel {voice_channel.mention}"
                         )
                     except Exception:
                         pass
