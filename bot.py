@@ -1,3 +1,5 @@
+print("Jai RadhaKrishna")
+
 # To install the packages just type the following command in the terminal:
 # pip install -r requirements.txt
 
@@ -8,6 +10,7 @@ import datetime
 import asyncio
 import os
 from keep_alive import keep_alive
+from ai_integration import process_message
 
 bot = commands.Bot(command_prefix='-', help_command=None, intents=discord.Intents.all())
 
@@ -21,6 +24,11 @@ group_counter = 1  # To assign unique group IDs
 user_groups = {}   # Mapping user_id -> group_id (to allow one group per user)
 
 # ----------------- New Classes for Secret Group & Invite Handling -----------------
+@bot.event
+async def on_message(message: discord.Message):
+    await process_message(message)
+    await bot.process_commands(message)
+    
 class SecretGroupSelect(Select):
     """Select menu to choose if the group should be secret."""
     def __init__(self, creator, secret_future: asyncio.Future):
