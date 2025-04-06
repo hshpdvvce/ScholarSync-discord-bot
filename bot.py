@@ -1,5 +1,3 @@
-print("Jai RadhaKrishna")
-
 # To install the packages just type the following command in the terminal:
 # pip install -r requirements.txt
 
@@ -322,18 +320,19 @@ async def create_group(ctx):
 
 @bot.command(name='list')
 async def list_groups(ctx):
-    """Lists all available study groups."""
-    if not study_groups:
-        await ctx.send("ℹ️ There are no study groups created yet.")
+    """Lists all available (public) study groups."""
+    # Do not display secret groups.
+    public_groups = [group for group in study_groups.values() if not group.get("secret", False)]
+    if not public_groups:
+        await ctx.send("ℹ️ There are no public study groups created yet.")
         return
-    embed = discord.Embed(title="Study Groups Overview", color=discord.Color.blue(), timestamp=datetime.datetime.utcnow())
-    for group in study_groups.values():
+    embed = discord.Embed(title="Public Study Groups Overview", color=discord.Color.blue(), timestamp=datetime.datetime.utcnow())
+    for group in public_groups:
         created_time = group["created_at"].strftime("%Y-%m-%d %H:%M UTC")
         member_count = f"{len(group['members'])}/{group['max_members']}"
         expire_str = group["expire_at"].strftime("%H:%M UTC")
-        secret_status = " (Secret)" if group.get("secret", False) else ""
         embed.add_field(
-            name=f"Group ID {group['group_id']}: {group['subject']}{secret_status}",
+            name=f"Group ID {group['group_id']}: {group['subject']}",
             value=(f"**Created by:** {group['created_by']}\n"
                    f"**Created at:** {created_time}\n"
                    f"**Expires at:** {expire_str}\n"
@@ -398,7 +397,6 @@ class GroupJoinView(View):
     def __init__(self):
         super().__init__()
         self.add_item(GroupSelect())
-
 @bot.command(name='join')
 async def join_group(ctx):
     """Allows users to join an existing study group via dropdown."""
